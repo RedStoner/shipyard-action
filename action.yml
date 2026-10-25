@@ -1,0 +1,51 @@
+name: Shipyard deploy
+description: Send build artifacts to a Pterodactyl panel running the Shipyard extension, signed and stamped.
+author: Shipyard
+branding:
+  icon: upload-cloud
+  color: blue
+inputs:
+  panel-url:
+    description: Base URL of the panel, e.g. https://panel.example.com (not needed with upload false)
+    required: false
+    default: ''
+  files:
+    description: Glob(s) of the .jar/.zip files to send, separated by spaces or new lines (e.g. build/libs/*-all.jar).
+    required: true
+  version:
+    description: Version written into the build stamp. Defaults to the version in each file name.
+    required: false
+    default: ''
+  stamp:
+    description: Write META-INF/shipyard-build.json into each archive (true/false).
+    required: false
+    default: 'true'
+  upload:
+    description: false only stamps the files in place and sends nothing (for workflows that hand their build over another way).
+    required: false
+    default: 'true'
+  max-mb:
+    description: Refuse files larger than this many MB (keep it under your proxy's limit, e.g. Cloudflare's 100 MB).
+    required: false
+    default: '95'
+  retries:
+    description: How many times to retry a failed upload (network errors, 429 and 5xx only).
+    required: false
+    default: '3'
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        INPUT_PANEL_URL: ${{ inputs.panel-url }}
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_STAMP: ${{ inputs.stamp }}
+        INPUT_UPLOAD: ${{ inputs.upload }}
+        INPUT_MAX_MB: ${{ inputs.max-mb }}
+        INPUT_RETRIES: ${{ inputs.retries }}
+        # Pull requests build the PR head, not the merge commit GitHub reports in GITHUB_SHA.
+        # workflow_run is refused by shipyard.sh: the run id, commit and branch must all be the build's.
+        SHIPYARD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        SHIPYARD_BRANCH: ${{ github.head_ref || github.ref_name }}
+      run: sh "$GITHUB_ACTION_PATH/shipyard.sh"
