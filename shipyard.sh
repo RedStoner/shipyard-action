@@ -61,6 +61,8 @@ for pattern in $patterns; do
     # shellcheck disable=SC2086 # the pattern is meant to glob
     for f in $pattern; do
         [ -f "$f" ] || continue
+        # Never a deployable, and beside the plugin's own jar it would read as a second copy of it.
+        case $f in *-sources.jar | *-javadoc.jar) continue ;; esac
         matched=1
         printf '%s\n' "$f" >>"$WORK/files"
     done
