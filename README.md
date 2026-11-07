@@ -2,6 +2,8 @@
 
 Sends your plugin builds to a Pterodactyl panel running the Shipyard extension. Each file is stamped with where it came from, signed with your repository's Shipyard secret, and uploaded. The panel then offers it on the **Deploy** tab of the servers you chose.
 
+> This folder is published as [RedStoner/shipyard-action](https://github.com/RedStoner/shipyard-action), so workflows can `uses: RedStoner/shipyard-action@v1`.
+
 ## Setup
 
 1. On the panel: **Admin → Extensions → Shipyard**, add a project for the repository and **Generate secret**. You get two values: a CI secret and a webhook secret.
@@ -33,7 +35,8 @@ Run the step in the workflow that builds the files (in the build job, or a later
 | `version` | from the file name | Version written into the build stamp. |
 | `stamp` | `true` | Write `META-INF/shipyard-build.json` into each archive (into a copy; your build output is not changed). |
 | `upload` | `true` | `false` stamps the files **in place** and sends nothing: for workflows that keep another handover or only keep the build as an Actions artifact. No panel URL or secret needed. |
-| `max-mb` | `95` | Refuse larger files. Keep it under your proxy's limit (Cloudflare: 100 MB). |
+| `local` | `true` | On a runner Shipyard manages, leave the build on the runner's disk for the panel to read through Wings instead of uploading it, so no proxy or upload limit applies. Anywhere else, or when the panel cannot read it, the file is uploaded. |
+| `max-mb` | `95` | Refuse larger uploads. Keep it under your proxy's limit (Cloudflare: 100 MB). A build handed over on a managed runner is not held to it. |
 | `retries` | `3` | Retries on network errors, 429 and 5xx, with backoff. |
 
 ## What it checks before sending anything

@@ -24,6 +24,10 @@ inputs:
     description: false only stamps the files in place and sends nothing (for workflows that hand their build over another way).
     required: false
     default: 'true'
+  local:
+    description: On a runner Shipyard manages, leave the build on the runner's disk for the panel to read instead of uploading it (true/false). Elsewhere it is always uploaded.
+    required: false
+    default: 'true'
   max-mb:
     description: Refuse files larger than this many MB (keep it under your proxy's limit, e.g. Cloudflare's 100 MB).
     required: false
@@ -42,6 +46,7 @@ runs:
         INPUT_VERSION: ${{ inputs.version }}
         INPUT_STAMP: ${{ inputs.stamp }}
         INPUT_UPLOAD: ${{ inputs.upload }}
+        INPUT_LOCAL: ${{ inputs.local }}
         INPUT_MAX_MB: ${{ inputs.max-mb }}
         INPUT_RETRIES: ${{ inputs.retries }}
         # Pull requests build the PR head, not the merge commit GitHub reports in GITHUB_SHA.

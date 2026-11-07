@@ -24,6 +24,18 @@ WORK=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/shipyard-$$
 # upload: false only stamps the files in place (for workflows that keep their own handover).
 UPLOAD=${INPUT_UPLOAD:-true}
 case $UPLOAD in true | false) ;; *) fail 'upload must be true or false.' ;; esac
+# On a runner Shipyard manages, the build is left on the runner's disk and the panel reads it
+# through Wings, so a large build never meets the web server's or PHP's upload limit. The start
+# script of those runners exports SHIPYARD_LOCAL_OUTBOX; anywhere else the file is uploaded.
+LOCAL=${INPUT_LOCAL:-true}
+case $LOCAL in true | false) ;; *) fail 'local must be true or false.' ;; esac
+OUTBOX=${SHIPYARD_LOCAL_OUTBOX:-}
+RUNNER=${RUNNER_NAME:-}
+if [ "$UPLOAD" = true ] && [ "$LOCAL" = true ] && [ -n "$OUTBOX" ] && [ -d "$OUTBOX" ] && [ -w "$OUTBOX" ] && [ -n "$RUNNER" ]; then
+    HANDOFF=true
+else
+    HANDOFF=false
+fi
 
 # GitHub vouches for an upload through the webhook of the run that sent it, so
 # the run id, commit and branch must all be the build's own. A workflow_run
@@ -97,7 +109,8 @@ while IFS= read -r f; do
     fi
     printf '%s\t%s\n' "$slug" "$name" >>"$WORK/slugs"
     size=$(wc -c <"$f" | tr -d ' ')
-    if [ "$size" -gt $((MAX_MB * 1024 * 1024)) ]; then
+    # A handoff has no proxy in the way; a file it cannot hand over is checked again before uploading.
+    if [ "$HANDOFF" = false ] && [ "$size" -gt $((MAX_MB * 1024 * 1024)) ]; then
         printf '::error file=%s::%s is %s bytes, above max-mb (%s MB)\n' "$f" "$name" "$size" "$MAX_MB"
         problems=$((problems + 1))
     fi
@@ -144,9 +157,64 @@ if [ "$UPLOAD" = false ]; then
     exit 0
 fi
 
+# Posts one file: $1 is the stamped copy, $2 its name, $3 the handoff directory or empty to
+# send the bytes. Sets code and result (the panel's X-Shipyard-Local-Result, for a handoff).
+post() {
+    p_body=$1
+    p_name=$2
+    p_dir=$3
+    attempt=0
+    while :; do
+        attempt=$((attempt + 1))
+        : >"$WORK/headers"
+        if [ -n "$p_dir" ]; then
+            code=$(curl -sS -o "$WORK/response" -D "$WORK/headers" -w '%{http_code}' -X POST \
+                -H 'Content-Type: application/octet-stream' \
+                -H 'Expect:' \
+                -H "X-Shipyard-Repo: $REPO" \
+                -H "X-Shipyard-Run: $RUN_ID" \
+                -H "X-Shipyard-File: $(sy_urlencode "$p_name")" \
+                -H "X-Shipyard-Branch: $(sy_urlencode "$BRANCH")" \
+                -H "X-Shipyard-Commit: $COMMIT" \
+                -H "X-Shipyard-Digest: $digest" \
+                -H "X-Shipyard-Signature: sha256=$signature" \
+                -H "X-Shipyard-Local: $p_dir" \
+                -H "X-Shipyard-Runner: $RUNNER" \
+                --data-binary '' \
+                "$PANEL_URL/extensions/shipyard/ingest") || code=000
+        else
+            code=$(curl -sS -o "$WORK/response" -D "$WORK/headers" -w '%{http_code}' -X POST \
+                -H 'Content-Type: application/octet-stream' \
+                -H 'Expect:' \
+                -H "X-Shipyard-Repo: $REPO" \
+                -H "X-Shipyard-Run: $RUN_ID" \
+                -H "X-Shipyard-File: $(sy_urlencode "$p_name")" \
+                -H "X-Shipyard-Branch: $(sy_urlencode "$BRANCH")" \
+                -H "X-Shipyard-Commit: $COMMIT" \
+                -H "X-Shipyard-Digest: $digest" \
+                -H "X-Shipyard-Signature: sha256=$signature" \
+                --data-binary "@$p_body" \
+                "$PANEL_URL/extensions/shipyard/ingest") || code=000
+        fi
+        result=$(tr -d '\r' <"$WORK/headers" | awk -F': *' 'tolower($1) == "x-shipyard-local-result" { v = $2 } END { print v }')
+        case $code in
+            000 | 429 | 5??)
+                [ "$attempt" -gt "$RETRIES" ] && return 0
+                wait=$((1 << attempt))
+                printf 'Sending %s got %s; retrying in %ds\n' "$p_name" "$code" "$wait"
+                sleep "$wait"
+                ;;
+            *) return 0 ;;
+        esac
+    done
+}
+
 sent=0
+handed=0
 failed=0
+n=0
 while IFS= read -r f; do
+    n=$((n + 1))
     name=$(basename "$f")
     body="$WORK/$name"
     if [ "${INPUT_STAMP:-true}" = true ]; then
@@ -157,48 +225,60 @@ while IFS= read -r f; do
     digest=$(sy_sha256_file "$body")
     signature=$(printf 'shipyard-v1\n%s\n%s\n%s\n%s\n%s\n%s' "$digest" "$REPO" "$RUN_ID" "$name" "$BRANCH" "$COMMIT" | sy_hmac) || fail 'signing failed'
 
-    attempt=0
-    while :; do
-        attempt=$((attempt + 1))
-        code=$(curl -sS -o "$WORK/response" -w '%{http_code}' -X POST \
-            -H 'Content-Type: application/octet-stream' \
-            -H 'Expect:' \
-            -H "X-Shipyard-Repo: $REPO" \
-            -H "X-Shipyard-Run: $RUN_ID" \
-            -H "X-Shipyard-File: $(sy_urlencode "$name")" \
-            -H "X-Shipyard-Branch: $(sy_urlencode "$BRANCH")" \
-            -H "X-Shipyard-Commit: $COMMIT" \
-            -H "X-Shipyard-Digest: $digest" \
-            -H "X-Shipyard-Signature: sha256=$signature" \
-            --data-binary "@$body" \
-            "$PANEL_URL/extensions/shipyard/ingest") || code=000
-        case $code in
-            2??)
-                printf 'Sent %s: %s\n' "$name" "$(cat "$WORK/response")"
-                sent=$((sent + 1))
-                break
-                ;;
-            000 | 429 | 5??)
-                if [ "$attempt" -gt "$RETRIES" ]; then
-                    printf '::error::%s: the panel answered %s after %d attempts: %s\n' "$name" "$code" "$attempt" "$(head -c 500 "$WORK/response" 2>/dev/null)"
-                    failed=$((failed + 1))
-                    break
-                fi
-                wait=$((1 << attempt))
-                printf 'Upload of %s got %s; retrying in %ds\n' "$name" "$code" "$wait"
-                sleep "$wait"
-                ;;
-            *)
-                printf '::error::%s was refused (%s): %s\n' "$name" "$code" "$(head -c 500 "$WORK/response")"
-                failed=$((failed + 1))
-                break
-                ;;
-        esac
-    done
+    upload=true
+    if [ "$HANDOFF" = true ]; then
+        dir="$RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-$$-$n"
+        if mkdir -p "$OUTBOX/$dir" && cp "$body" "$OUTBOX/$dir/$name"; then
+            post "$body" "$name" "$dir"
+            rm -rf "${OUTBOX:?}/$dir"
+            if [ "$result" = read ]; then
+                upload=false
+                case $code in
+                    2??)
+                        printf 'Handed %s to the panel on this runner: %s\n' "$name" "$(cat "$WORK/response")"
+                        sent=$((sent + 1))
+                        handed=$((handed + 1))
+                        ;;
+                    *)
+                        printf '::error::%s was refused (%s): %s\n' "$name" "$code" "$(head -c 500 "$WORK/response")"
+                        failed=$((failed + 1))
+                        ;;
+                esac
+            else
+                printf 'The panel did not read %s from this runner (%s: %s); uploading it instead.\n' "$name" "$code" "$(head -c 300 "$WORK/response" 2>/dev/null)"
+            fi
+        else
+            rm -rf "${OUTBOX:?}/$dir"
+            printf 'Could not write %s to %s; uploading it instead.\n' "$name" "$OUTBOX"
+        fi
+    fi
+    [ "$upload" = true ] || continue
+
+    size=$(wc -c <"$body" | tr -d ' ')
+    if [ "$size" -gt $((MAX_MB * 1024 * 1024)) ]; then
+        printf '::error::%s is %s bytes, above max-mb (%s MB)\n' "$name" "$size" "$MAX_MB"
+        failed=$((failed + 1))
+        continue
+    fi
+    post "$body" "$name" ''
+    case $code in
+        2??)
+            printf 'Sent %s: %s\n' "$name" "$(cat "$WORK/response")"
+            sent=$((sent + 1))
+            ;;
+        000 | 429 | 5??)
+            printf '::error::%s: the panel answered %s after %d attempts: %s\n' "$name" "$code" "$attempt" "$(head -c 500 "$WORK/response" 2>/dev/null)"
+            failed=$((failed + 1))
+            ;;
+        *)
+            printf '::error::%s was refused (%s): %s\n' "$name" "$code" "$(head -c 500 "$WORK/response")"
+            failed=$((failed + 1))
+            ;;
+    esac
 done <"$WORK/files"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-    printf '### Shipyard\nSent %d file(s) to %s; %d failed.\n' "$sent" "$PANEL_URL" "$failed" >>"$GITHUB_STEP_SUMMARY"
+    printf '### Shipyard\nSent %d file(s) to %s (%d read from this runner); %d failed.\n' "$sent" "$PANEL_URL" "$handed" "$failed" >>"$GITHUB_STEP_SUMMARY"
 fi
 rm -rf "$WORK"
 [ "$failed" -eq 0 ] || exit 1
