@@ -75,6 +75,8 @@ for pattern in $patterns; do
         [ -f "$f" ] || continue
         # Never a deployable, and beside the plugin's own jar it would read as a second copy of it.
         case $f in *-sources.jar | *-javadoc.jar) continue ;; esac
+        # Gradle's jar without the shaded dependencies, built beside the full one: the full one is the deployable.
+        case $f in *-plain.jar) [ -f "${f%-plain.jar}.jar" ] && continue ;; esac
         matched=1
         printf '%s\n' "$f" >>"$WORK/files"
     done
